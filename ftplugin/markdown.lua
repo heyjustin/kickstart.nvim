@@ -41,7 +41,6 @@ for key, val in pairs(arrows) do
 end
 
 -- Paste image functionality - required `brew install pngpaste`
-
 local function paste_image()
   -- Create images directory if it doesn't exist
   local file_dir = vim.fn.expand '%:p:h'
@@ -51,8 +50,20 @@ local function paste_image()
     vim.fn.mkdir(img_dir, 'p')
   end
 
-  -- Generate a unique filename with timestamp
-  local filename = 'image_' .. os.date '%Y%m%d%H%M%S' .. '.png'
+  -- Ask for image name
+  vim.cmd 'echohl Question'
+  local image_name = vim.fn.input('Image name (without extension): ', '')
+  vim.cmd 'echohl None'
+
+  -- If user cancels (empty input), use timestamp as before
+  local filename
+  if image_name == '' then
+    filename = 'image_' .. os.date '%Y%m%d%H%M%S' .. '.png'
+  else
+    -- Use the provided name
+    filename = image_name .. '.png'
+  end
+
   local filepath = img_dir .. '/' .. filename
 
   -- Try to paste the image
@@ -65,7 +76,7 @@ local function paste_image()
   end
 
   -- Insert markdown image link
-  local image_link = '![' .. filename .. '](images/' .. filename .. ')'
+  local image_link = '![' .. image_name .. '](images/' .. filename .. ')'
   local cursor_pos = vim.api.nvim_win_get_cursor(0)
   local line = vim.api.nvim_get_current_line()
   local new_line = line:sub(1, cursor_pos[2]) .. image_link .. line:sub(cursor_pos[2] + 1)
