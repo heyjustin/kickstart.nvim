@@ -71,7 +71,7 @@ local function paste_image()
   local exit_code = vim.v.shell_error
 
   if exit_code ~= 0 then
-    print 'Error: No image data in clipboard or pngpaste failed'
+    error_message 'Error: No image data in clipboard or pngpaste failed'
     return
   end
 
@@ -174,3 +174,192 @@ end
 vim.keymap.set('n', '<leader>mtt', function()
   update_markdown_toc '## Table of contents'
 end, { desc = 'Insert/update Markdown TOC' })
+
+-- Export to wiki functionality
+local function export_to_wiki(opts)
+  local function capitalize_and_remove_spaces(str)
+    -- Function to capitalize the first letter of a word
+    local function capitalizeFirst(word)
+      if #word > 0 then
+        return word:sub(1, 1):upper() .. word:sub(2)
+      else
+        return word
+      end
+    end
+
+    -- Split the string into words, capitalize each word, and concatenate without spaces
+    local result = ''
+    for word in str:gmatch '%S+' do
+      result = result .. capitalizeFirst(word)
+    end
+
+    return result
+  end
+
+  local debug_mode = (opts ~= nil) and (opts.args == 'debug') or false
+
+  -- Use colored output for progress messages
+  local function success_message(msg)
+    vim.api.nvim_echo({ { msg, 'String' } }, true, {})
+    vim.cmd 'redraw' -- Force immediate display
+  end
+
+  local function error_message(msg)
+    vim.api.nvim_echo({ { msg, 'ErrorMsg' } }, true, {})
+  end
+
+  local function debug_message(msg)
+    vim.api.nvim_echo({ { msg, 'Comment' } }, true, {})
+    vim.cmd 'redraw' -- Force immediate display
+  end
+
+  local function url_message(msg, url)
+    vim.api.nvim_echo({ { msg, 'String' }, { url, 'Directory' } }, true, {})
+  end
+
+  success_message 'Preparing content for export...'
+
+  local user = os.getenv 'USER'
+  local wiki_base_url = os.getenv 'WIKI_BASE_URL'
+
+  -- Get the current buffer content
+  local lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
+  local content = table.concat(lines, '\n')
+
+  -- Check if the file has frontmatter (starts with ---)
+  if not content:match '^%-%-%-\n' then
+    error_message "Error: No frontmatter found. The file must start with '---'"
+    return
+  end
+
+  -- Extract frontmatter
+  local frontmatter = content:match '^%-%-%-\n(.-)\n%-%-%-\n'
+  if not frontmatter then
+    error_message "Error: Invalid frontmatter format. Must be enclosed with '---'"
+    return
+  end
+
+  -- Parse frontmatter to extract title and wiki-path
+  local title, wiki_path
+  for line in frontmatter:gmatch '[^\r\n]+' do
+    local key, value = line:match '^%s*(%S+):%s*(.+)%s*$'
+    if key and value then
+      if key == 'title' then
+        title = value:gsub('^%s*(.-)%s*$', '%1') -- Trim whitespace
+      elseif key == 'wiki-path' then
+        wiki_path = value:gsub('^%s*(.-)%s*$', '%1') -- Trim whitespace
+      end
+    end
+  end
+
+  -- Validate required fields
+  if not title then
+    error_message "Error: Missing 'title' in frontmatter. Please add a title before exporting."
+    return
+  end
+
+  if not wiki_path then
+    error_message "Error: Missing 'wiki-path' in frontmatter. Please add a wiki-path before exporting."
+    return
+  end
+
+  -- Strip frontmatter from content
+  local document_content = content:gsub('^%-%-%-\n.-\n%-%-%-\n', '')
+
+  -- Create URL-friendly title by removing spaces and capitalizing each word
+  local url_title = capitalize_and_remove_spaces(title)
+
+  -- Escape XML special characters in content
+  local escaped_content = document_content:gsub('&', '&amp;'):gsub('<', '&lt;'):gsub('>', '&gt;'):gsub('"', '&quot;'):gsub("'", '&apos;')
+
+  -- Escape XML special characters in title
+  local escaped_title = title:gsub('&', '&amp;'):gsub('<', '&lt;'):gsub('>', '&gt;'):gsub('"', '&quot;'):gsub("'", '&apos;')
+
+  -- Create XML payload
+  local xml_payload = string.format(
+    [[<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<page xmlns="http://www.xwiki.org">
+  <comment>Exported from Neovim</comment>
+  <content>%s</content>
+  <syntax>markdown/1.2</syntax>
+  <title>%s</title>
+</page>]],
+    escaped_content,
+    escaped_title
+  )
+
+  -- Construct the wiki path
+  local wiki_spaces = ''
+  for part in wiki_path:gmatch '[^/]+' do
+    wiki_spaces = wiki_spaces .. '/spaces/' .. part
+  end
+
+  -- Construct the endpoint URL
+  local endpoint = string.format('%/rest/wikis/xwiki/spaces/Users/spaces/%s%s/spaces/%s/pages/WebHome', wiki_base_url, user, wiki_spaces, url_title)
+
+  -- STEP 1: First make a GET request to establish authentication context
+  success_message 'Authenticating with wiki...'
+  local get_command = string.format([[curl -L --cookie ~/.midway/cookie --cookie-jar ~/.midway/cookie -X GET "%s"]], endpoint)
+
+  -- Execute the GET request
+  local get_temp_file = os.tmpname()
+  local get_cmd_file = io.open(get_temp_file, 'w')
+  get_cmd_file:write(get_command)
+  get_cmd_file:close()
+
+  local get_output_file = os.tmpname()
+  os.execute('bash ' .. get_temp_file .. ' > ' .. get_output_file .. ' 2>&1')
+
+  -- STEP 2: Then make the PUT request with the XML payload
+  success_message 'Uploading content to wiki...'
+  local put_command = string.format(
+    [[curl -L --cookie ~/.midway/cookie --cookie-jar ~/.midway/cookie -X PUT -H "Content-Type: application/xml" -d '%s' "%s"]],
+    xml_payload:gsub("'", "'\\''"), -- Escape single quotes for shell
+    endpoint
+  )
+
+  -- Execute the PUT request
+  local put_temp_file = os.tmpname()
+  local put_cmd_file = io.open(put_temp_file, 'w')
+  put_cmd_file:write(put_command)
+  put_cmd_file:close()
+
+  local put_output_file = os.tmpname()
+  os.execute('bash ' .. put_temp_file .. ' > ' .. put_output_file .. ' 2>&1')
+
+  -- Read and display output from PUT request
+  local result_file = io.open(put_output_file, 'r')
+  local result = result_file:read '*all'
+  result_file:close()
+
+  -- Clean up temporary files
+  os.remove(get_temp_file)
+  os.remove(get_output_file)
+  os.remove(put_temp_file)
+  os.remove(put_output_file)
+
+  -- Show result
+  url_message('Export complete.  Wiki URL: ' .. wiki_base_url .. '/bin/view/Users/' .. user .. '/' .. wiki_path .. '/' .. url_title)
+
+  -- Show commands for debugging
+  if debug_mode then
+    -- Show commands for debugging
+    debug_message '\nExecuted commands:'
+    debug_message('1. GET: ' .. get_command)
+    debug_message('2. PUT: ' .. put_command)
+
+    -- Show response
+    if #result > 0 then
+      debug_message '\nResponse:'
+      debug_message(result)
+    end
+  end
+end
+
+-- Register the command
+vim.api.nvim_create_user_command('MarkdownWikiExport', export_to_wiki, {
+  nargs = '?', -- Accept 0 or 1 argument
+  desc = 'Export current markdown file to wiki (use "debug" for verbose output)',
+})
+
+vim.keymap.set('n', '<leader>mwe', export_to_wiki, { desc = '[m]arkdown [w]iki [e]xport' })
